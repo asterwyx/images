@@ -1,5 +1,14 @@
 name: build all images
 on:
+  push:
+    branches: [main]
+    paths:
+    - '*/Dockerfile'
+    - '*/version.sh'
+    - '*/platforms'
+    - '.github/workflows/images-build.yaml'
+    - '.github/workflows/image-build.yaml'
+    - '.functions/**'
   schedule:
   - cron: '0 2 */3 * *'
   workflow_dispatch:
