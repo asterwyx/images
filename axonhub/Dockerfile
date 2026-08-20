@@ -1,0 +1,65 @@
+FROM alpine AS fetcher
+ARG VERSION=unstable
+WORKDIR /workspace
+RUN apk add --no-cache git patch
+RUN git clone --branch ${VERSION} --depth=1 https://github.com/looplj/axonhub.git .
+COPY hide-original-models-fix.patch /tmp/patch.patch
+RUN git apply /tmp/patch.patch
+
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
+
+WORKDIR /build
+RUN corepack enable && corepack prepare pnpm@10 --activate
+COPY --from=fetcher /workspace/frontend/package.json /workspace/frontend/pnpm-lock.yaml ./
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+
+COPY --from=fetcher /workspace/frontend .
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+RUN pnpm build
+
+FROM alpine AS frontend-dist
+COPY --from=frontend-builder /build/dist /dist
+
+FROM golang:alpine AS backend-builder
+
+WORKDIR /build
+
+RUN apk add --no-cache git ca-certificates tzdata
+
+COPY --from=fetcher /workspace/go.mod /workspace/go.sum ./
+COPY --from=fetcher /workspace/llm/go.mod /workspace/llm/go.sum llm/
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOTOOLCHAIN=auto go mod download
+
+COPY --from=fetcher /workspace/ .
+COPY --from=frontend-dist /dist /build/internal/server/static/dist
+
+ENV GO111MODULE=on \
+    CGO_ENABLED=0 \
+    GOOS=linux
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOTOOLCHAIN=auto go build \
+    -tags=nomsgpack \
+    -ldflags "-s -w -X 'github.com/looplj/axonhub/internal/build.Version=$(cat internal/build/VERSION 2>/dev/null || echo dev)' -X 'github.com/looplj/axonhub/internal/build.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)'" \
+    -o axonhub \
+    ./cmd/axonhub && \
+    ./scripts/verify-go-sse-dependency-test.sh && \
+    ./scripts/verify-go-sse-dependency.sh ./axonhub
+
+FROM alpine
+
+RUN apk add --no-cache ca-certificates tzdata
+RUN addgroup -S -g 65532 axonhub \
+    && adduser -S -D -H -u 65532 -G axonhub axonhub
+
+WORKDIR /app
+COPY --from=backend-builder --chown=axonhub:axonhub /build/axonhub /app/axonhub
+
+USER 65532:65532
+
+EXPOSE 8090
+ENTRYPOINT ["/app/axonhub"]

@@ -77,7 +77,7 @@ jobs:
         provenance: false
         push: true
         tags: |
-          ghcr.io/tsic404/${{ steps.string.outputs.lowercase }}:latest,ghcr.io/tsic404/${{ steps.string.outputs.lowercase }}:${{ steps.version.outputs.current_version }}
+          ghcr.io/asterwyx/${{ steps.string.outputs.lowercase }}:latest,ghcr.io/asterwyx/${{ steps.string.outputs.lowercase }}:${{ steps.version.outputs.current_version }}
 
     - name: commit version record
       if: steps.check.outputs.should_build == 'true'

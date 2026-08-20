@@ -1,0 +1,267 @@
+From 877b1eafb4516282925f3e627d758a113a1fe1c8 Mon Sep 17 00:00:00 2001
+From: Yixue Wang <yixue.wang@outlook.com>
+Date: Thu, 30 Jul 2026 14:00:11 +0800
+Subject: [PATCH] fix(biz): only hide original models that have an alias
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+HideOriginalModels used to remove every direct entry from GetModelEntries(),
+even for models with no prefix/auto_trim/mapping alias. That made such a
+channel's models unmatchable by model associations (global/channel/channel-
+tags exact match and regex) — e.g. opening "hide original models" on a
+channel made "global exact match" miss the channel's model.
+
+Only delete a direct entry when an alternative access path to the same
+underlying model already exists (a prefix, auto_trim, or mapping entry
+resolving to the same ActualModel). An original model with no alias is kept,
+so associations can still route to it; an original model that has an alias
+is still hidden, deferring to the alias on the /v1/models list as before.
+
+Add regression tests covering HideOriginalModels with and without an alias
+at both the GetModelEntries level and the matcher level (global/channel/
+channel-tags exact match and regex).
+
+Ref #2110
+
+Co-Authored-By: GLM-5.2
+---
+ internal/server/biz/channel_llm.go            |  19 ++-
+ .../server/biz/channel_model_entry_test.go    |  35 ++++
+ .../biz/model_association_matcher_test.go     | 151 ++++++++++++++++++
+ 3 files changed, 202 insertions(+), 3 deletions(-)
+
+diff --git a/internal/server/biz/channel_llm.go b/internal/server/biz/channel_llm.go
+index 1b1cf74aef..4208541261 100644
+--- a/internal/server/biz/channel_llm.go
++++ b/internal/server/biz/channel_llm.go
+@@ -1256,11 +1256,24 @@ func (ch *Channel) GetModelEntries() map[string]ChannelModelEntry {
+ 	}
+
+ 	// 5. Hide original models if configured
+-	// When hideOriginalModels is enabled, remove direct models from the entries
+-	// This allows only transformed models (prefix, auto_trim, mapping) to be exposed
++	// When hideOriginalModels is enabled, remove a channel's original
++	// (direct, upstream-named) model ONLY when an alternative access path to
++	// that same underlying model already exists (a prefix, auto_trim, or
++	// mapping entry resolving to the same ActualModel). An original model
++	// that has no such alias is kept, otherwise it would become unreachable
++	// (and unmatchable by model associations) for no benefit. This preserves
++	// the intent of "hide original models" — defer to the alias when one
++	// exists — while only hiding originals that genuinely have an alias.
+ 	if ch.Settings.HideOriginalModels {
++		hasAlternative := make(map[string]bool)
++		for _, entry := range entries {
++			if entry.Source != "direct" {
++				hasAlternative[entry.ActualModel] = true
++			}
++		}
++
+ 		for key, entry := range entries {
+-			if entry.Source == "direct" {
++			if entry.Source == "direct" && hasAlternative[entry.ActualModel] {
+ 				delete(entries, key)
+ 			}
+ 		}
+diff --git a/internal/server/biz/channel_model_entry_test.go b/internal/server/biz/channel_model_entry_test.go
+index ddf517b4d9..f5311fd548 100644
+--- a/internal/server/biz/channel_model_entry_test.go
++++ b/internal/server/biz/channel_model_entry_test.go
+@@ -518,3 +518,38 @@ func TestChannel_GetUnifiedModels_LowercaseModelID(t *testing.T) {
+ 		})
+ 	}
+ }
++
++// TestChannel_GetModelEntries_HideOriginalModels_KeepsUnmappedDirect covers the
++// regression where enabling HideOriginalModels on a channel whose models have
++// NO transformation (no prefix, auto-trim, or mapping alias) used to remove
++// every direct entry, leaving the channel's models unreachable and unmatchable
++// by model associations. With the fix, an original model that has no alias is
++// kept, while an original model that does have an alias is still hidden.
++func TestChannel_GetModelEntries_HideOriginalModels_KeepsUnmappedDirect(t *testing.T) {
++	ch := &Channel{
++		Channel: &ent.Channel{
++			SupportedModels: []string{"plain-model", "aliased-model"},
++			Settings: &objects.ChannelSettings{
++				HideOriginalModels: true,
++				ModelMappings: []objects.ModelMapping{
++					{From: "alias", To: "aliased-model"},
++				},
++			},
++		},
++	}
++
++	entries := ch.GetModelEntries()
++
++	// plain-model has no alternative access path -> the original must stay.
++	require.Contains(t, entries, "plain-model",
++		"an original model with no alias must not be hidden by HideOriginalModels")
++	require.Equal(t, "plain-model", entries["plain-model"].ActualModel)
++	require.Equal(t, "direct", entries["plain-model"].Source)
++
++	// aliased-model has a mapping alias -> its direct form is hidden, the
++	// alias remains the exposed access path.
++	require.NotContains(t, entries, "aliased-model",
++		"an original model that has an alias must still be hidden")
++	require.Contains(t, entries, "alias")
++	require.Equal(t, "aliased-model", entries["alias"].ActualModel)
++}
+diff --git a/internal/server/biz/model_association_matcher_test.go b/internal/server/biz/model_association_matcher_test.go
+index ee48d7e2b8..67fbe2ab15 100644
+--- a/internal/server/biz/model_association_matcher_test.go
++++ b/internal/server/biz/model_association_matcher_test.go
+@@ -1275,3 +1275,154 @@ func TestMatchAssociations_ChannelTagsRegex(t *testing.T) {
+ 		}
+ 	})
+ }
++
++// TestMatchAssociations_HideOriginalModels_KeepsUnmappedModels verifies the
++// regression fix for the bug where enabling a channel's "hide original models"
++// setting (HideOriginalModels) made the channel's models invisible to ALL
++// model association matchers (global/channel/channel-tags exact match and
++// regex). After the fix, HideOriginalModels only hides an original model when
++// it has an alias (prefix/auto_trim/mapping); a model with no alias stays
++// matchable by its original name.
++func TestMatchAssociations_HideOriginalModels_KeepsUnmappedModels(t *testing.T) {
++	// Enable HideOriginalModels but give the model NO transformation: with the
++	// old unconditional deletion the matcher would find nothing.
++	channels := []*Channel{
++		{
++			Channel: &ent.Channel{
++				ID:              1,
++				Name:            "plain",
++				Type:            channel.TypeOpenai,
++				SupportedModels: []string{"gpt-4o"},
++				Settings: &objects.ChannelSettings{
++					HideOriginalModels: true,
++				},
++			},
++		},
++		// Channel 2 has an alias for the same model name: the original entry is
++		// hidden (only the alias "gpt-4o-mini" stays). A global exact match for
++		// "gpt-4o" must NOT match channel 2 (original hidden), only channel 1.
++		{
++			Channel: &ent.Channel{
++				ID:              2,
++				Name:            "aliased",
++				Type:            channel.TypeOpenai,
++				SupportedModels: []string{"gpt-4o"},
++				Settings: &objects.ChannelSettings{
++					HideOriginalModels: true,
++					ModelMappings: []objects.ModelMapping{
++						{From: "gpt-4o-mini", To: "gpt-4o"},
++					},
++				},
++				Tags: []string{"aliased"},
++			},
++		},
++	}
++
++	t.Run("global exact match finds channel with plain hidden original", func(t *testing.T) {
++		associations := []*objects.ModelAssociation{
++			{
++				Type:     "model",
++				Priority: 1,
++				ModelID:  &objects.ModelIDAssociation{ModelID: "gpt-4o"},
++			},
++		}
++
++		result := MatchConnections(associations, channels)
++
++		// Only channel 1 (no alias) is matchable by the original name; the
++		// aliased channel 2's original "gpt-4o" is hidden.
++		require.Len(t, result, 1)
++		require.Equal(t, 1, result[0].Channel.ID)
++		require.Equal(t, "gpt-4o", result[0].Models[0].RequestModel)
++		require.Equal(t, "gpt-4o", result[0].Models[0].ActualModel)
++	})
++
++	t.Run("global exact match finds aliased channel by its alias name", func(t *testing.T) {
++		associations := []*objects.ModelAssociation{
++			{
++				Type:     "model",
++				Priority: 1,
++				ModelID:  &objects.ModelIDAssociation{ModelID: "gpt-4o-mini"},
++			},
++		}
++
++		result := MatchConnections(associations, channels)
++
++		require.Len(t, result, 1)
++		require.Equal(t, 2, result[0].Channel.ID)
++		require.Equal(t, "gpt-4o-mini", result[0].Models[0].RequestModel)
++		require.Equal(t, "gpt-4o", result[0].Models[0].ActualModel)
++	})
++
++	t.Run("channel exact match finds channel with plain hidden original", func(t *testing.T) {
++		associations := []*objects.ModelAssociation{
++			{
++				Type:     "channel_model",
++				Priority: 1,
++				ChannelModel: &objects.ChannelModelAssociation{
++					ChannelID: 1,
++					ModelID:   "gpt-4o",
++				},
++			},
++		}
++
++		result := MatchConnections(associations, channels)
++
++		require.Len(t, result, 1)
++		require.Equal(t, 1, result[0].Channel.ID)
++		require.Equal(t, "gpt-4o", result[0].Models[0].ActualModel)
++	})
++
++	t.Run("channel-tags exact match finds channel with plain hidden original", func(t *testing.T) {
++		// Re-create channel 1 with a tag so channel-tags matching applies.
++		taggedChannels := []*Channel{
++			{
++				Channel: &ent.Channel{
++					ID:              1,
++					Name:            "plain",
++					Type:            channel.TypeOpenai,
++					SupportedModels: []string{"gpt-4o"},
++					Tags:            []string{"plain"},
++					Settings: &objects.ChannelSettings{
++						HideOriginalModels: true,
++					},
++				},
++			},
++		}
++
++		associations := []*objects.ModelAssociation{
++			{
++				Type:     "channel_tags_model",
++				Priority: 1,
++				ChannelTagsModel: &objects.ChannelTagsModelAssociation{
++					ChannelTags: []string{"plain"},
++					ModelID:     "gpt-4o",
++				},
++			},
++		}
++
++		result := MatchConnections(associations, taggedChannels)
++
++		require.Len(t, result, 1)
++		require.Equal(t, "gpt-4o", result[0].Models[0].ActualModel)
++	})
++
++	t.Run("regex match finds channel with plain hidden original", func(t *testing.T) {
++		associations := []*objects.ModelAssociation{
++			{
++				Type:     "regex",
++				Priority: 1,
++				Regex:    &objects.RegexAssociation{Pattern: "^gpt-4o$"},
++			},
++		}
++
++		result := MatchConnections(associations, channels)
++
++		// Channel 1's original "gpt-4o" is kept (no alias); channel 2's
++		// original is hidden but its alias "gpt-4o-mini" does not match the
++		// anchored pattern, so only channel 1 is matched.
++		require.Len(t, result, 1)
++		require.Equal(t, 1, result[0].Channel.ID)
++		require.Equal(t, "gpt-4o", result[0].Models[0].RequestModel)
++	})
++}
