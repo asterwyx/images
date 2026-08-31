@@ -10,7 +10,7 @@ source "${SCRIPT_DIR}/../.functions/github.sh"
 source "${SCRIPT_DIR}/../.functions/version.sh"
 
 # 镜像特定配置
-LAST_VERSION=v1.0.0-beta7
+LAST_VERSION=v1.0.0-beta7-5e57ed5
 OWNER="looplj"
 REPO="axonhub"
 DAYS_BEFORE=3
