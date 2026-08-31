@@ -1,0 +1,6 @@
+# Patches applied to upstream axonhub source at build time.
+# One patch per line, applied in listed order via `git apply`.
+# Lines starting with '#' are comments and skipped.
+
+0001-hide-original-models-fix.patch
+0002-fix-image-edits-content-type.patch

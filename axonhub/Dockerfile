@@ -1,10 +1,15 @@
 FROM alpine AS fetcher
 ARG VERSION=unstable
 WORKDIR /workspace
-RUN apk add --no-cache git patch
+RUN apk add --no-cache git
 RUN git clone --branch ${VERSION} --depth=1 https://github.com/looplj/axonhub.git .
-COPY hide-original-models-fix.patch /tmp/patch.patch
-RUN git apply /tmp/patch.patch
+COPY patches/ /tmp/patches/
+RUN set -e; \
+    while IFS= read -r line; do \
+      case "$line" in \#*|"") continue ;; esac; \
+      echo "Applying patch: $line"; \
+      git apply "/tmp/patches/$line" || { echo "FAILED: $line"; exit 1; }; \
+    done < /tmp/patches/series
 
 FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
 
