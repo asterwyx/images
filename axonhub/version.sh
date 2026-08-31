@@ -56,6 +56,7 @@ main() {
         log_error "查询GitHub tags失败"
         echo "current_version="
         echo "last_version=${LAST_VERSION}"
+        echo "upstream_version="
         return 1
     }
 
@@ -67,6 +68,7 @@ main() {
         log_error "计算截止时间失败"
         echo "current_version="
         echo "last_version=${LAST_VERSION}"
+        echo "upstream_version="
         return 1
     }
 
@@ -80,6 +82,7 @@ main() {
         log_warning "未找到符合条件的稳定版本（${DAYS_BEFORE}天前）"
         echo "current_version="
         echo "last_version=${LAST_VERSION}"
+        echo "upstream_version="
         return 0
     fi
 
@@ -92,6 +95,7 @@ main() {
 
     echo "current_version=${current_version}"
     echo "last_version=${LAST_VERSION}"
+    echo "upstream_version=${upstream_version}"
 }
 
 # 运行主函数
