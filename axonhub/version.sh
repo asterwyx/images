@@ -13,7 +13,7 @@ source "${SCRIPT_DIR}/../.functions/version.sh"
 LAST_VERSION=v1.0.0-beta7-5e57ed5
 OWNER="looplj"
 REPO="axonhub"
-DAYS_BEFORE=3
+DAYS_BEFORE=1
 
 # 计算补丁指纹：对 series 清单 + 所有引用的 patch 内容取 sha256 前 7 位。
 # 相同补丁集 → 相同指纹；任何改动 → 指纹变化。无补丁时返回 "none"。

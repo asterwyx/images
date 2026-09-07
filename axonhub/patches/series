@@ -2,5 +2,6 @@
 # One patch per line, applied in listed order via `git apply`.
 # Lines starting with '#' are comments and skipped.
 
+# 0002-fix-image-edits-content-type.patch removed: the fix was merged
+# upstream in PR #2370 and is included in v1.0.0-beta10+.
 0001-hide-original-models-fix.patch
-0002-fix-image-edits-content-type.patch
